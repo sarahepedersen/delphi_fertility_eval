@@ -149,9 +149,6 @@ def load_name_map(meta_path: str | Path | None, labels_csv: str | Path | None = 
             meta = pickle.load(fh)
         name_to_id.update(_name_map_from_meta(meta))
 
-    if labels_csv is not None:
-        name_to_id.update(_name_map_from_csv(labels_csv))
-
     if not name_to_id:
         raise ValueError(
             "Could not build a token name->id map. Provide paths.meta (meta.pkl with "

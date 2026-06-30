@@ -29,6 +29,13 @@ from .vocab import TokenVocab
 
 DAYS_PER_YEAR = 365.25
 
+# Raw Delphi .bin files store token ids one BELOW the model/meta index: Delphi's
+# get_batch applies `tokens = tokens + 1` at load time (so it can manufacture the reserved
+# Padding=0 and No-event=1 tokens, which never appear in the raw file). When we read the
+# raw bin directly (extraction / forecast seeds) we apply the same +1 so ids line up with
+# meta.pkl. The AUC/inference path goes through get_batch and must NOT be shifted here.
+TOKEN_OFFSET = 1
+
 
 @dataclass
 class FertilityData:
@@ -49,7 +56,7 @@ class FertilityData:
         recs = []
         for wid, (start, length) in enumerate(p2i):
             rows = data[start:start + length]
-            recs.append(_extract_woman(wid, rows[:, 2], rows[:, 1], vocab, completion_age, repro_ages))
+            recs.append(_extract_woman(wid, rows[:, 2] + TOKEN_OFFSET, rows[:, 1], vocab, completion_age, repro_ages))
         return _assemble(recs, "observed", completion_age)
 
     @classmethod
@@ -78,19 +85,24 @@ class FertilityData:
 
 
 def merge(observed: FertilityData, forecast: FertilityData) -> FertilityData:
-    """Combine observed rows with forecast continuations into one dataset.
+    """Combine observed-complete women with model forecasts into one completed dataset.
 
-    Forecast tables are expected to carry only the *added* rows (post-cutoff births /
-    woman-years) and updated ``women`` rows; we drop observed women that were re-forecast
-    and union the rest, so estimators see one completed dataset.
+    The observed *incomplete* women are dropped (the forecast replaces them) and the
+    forecast woman_ids are offset so they never collide with observed ids.
     """
-    reforecast_ids = set(forecast.women["woman_id"])
-    keep = ~observed.women["woman_id"].isin(reforecast_ids)
-    women = pd.concat([observed.women[keep], forecast.women], ignore_index=True)
-    births = pd.concat([observed.births[observed.births["woman_id"].isin(set(women["woman_id"]))],
-                        forecast.births], ignore_index=True)
-    exposure = pd.concat([observed.exposure[observed.exposure["woman_id"].isin(set(women["woman_id"]))],
-                          forecast.exposure], ignore_index=True)
+    drop = set(observed.incomplete_women["woman_id"])
+    keep = ~observed.women["woman_id"].isin(drop)
+    offset = (int(observed.women["woman_id"].max()) + 1) if len(observed.women) else 0
+
+    def shift(df):
+        return df.assign(woman_id=df["woman_id"] + offset)
+
+    women = pd.concat([observed.women[keep], shift(forecast.women)], ignore_index=True)
+    kept = set(women["woman_id"])
+    births = pd.concat([observed.births[observed.births["woman_id"].isin(kept)], shift(forecast.births)],
+                       ignore_index=True)
+    exposure = pd.concat([observed.exposure[observed.exposure["woman_id"].isin(kept)], shift(forecast.exposure)],
+                         ignore_index=True)
     return FertilityData("observed+forecast", women, births, exposure, observed.completion_age)
 
 
@@ -171,6 +183,13 @@ def _assemble(recs, source, completion_age) -> FertilityData:
     for df in (women, births, exposure):
         df["source"] = source
     return FertilityData(source, women, births, exposure, completion_age)
+
+
+def patient_sequences(data: np.ndarray) -> list[tuple[np.ndarray, np.ndarray]]:
+    """Per-woman (tokens, ages_days), indexed by woman_id. Tokens are shifted to the model
+    index (raw bin + TOKEN_OFFSET) so seeds fed to the model match its vocabulary."""
+    return [(data[s:s + n, 2].astype(np.int64) + TOKEN_OFFSET, data[s:s + n, 1].astype(np.float64))
+            for (s, n) in _patient_index(data)]
 
 
 def _patient_index(data: np.ndarray) -> list[tuple[int, int]]:

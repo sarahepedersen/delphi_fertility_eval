@@ -37,11 +37,12 @@ def _add_common(p: argparse.ArgumentParser) -> None:
     p.add_argument("--block-size", type=int, default=None)
     p.add_argument("--batch-size", type=int, default=None)
     p.add_argument("--no-event-token-rate", type=int, default=None)
+    p.add_argument("--n-samples", type=int, default=None, help="forecast: Monte-Carlo trajectories per woman")
     p.add_argument("--seed", type=int, default=None)
 
 
 def _overrides_from_args(args: argparse.Namespace) -> dict:
-    paths, inference, metrics = {}, {}, {}
+    paths, inference, metrics, forecast = {}, {}, {}, {}
     if args.delphi_repo is not None: paths["delphi_repo"] = args.delphi_repo
     if args.ckpt is not None: paths["ckpt"] = args.ckpt
     if args.data is not None: paths["data"] = args.data
@@ -55,10 +56,12 @@ def _overrides_from_args(args: argparse.Namespace) -> dict:
     if args.no_event_token_rate is not None: inference["no_event_token_rate"] = args.no_event_token_rate
     if args.n_bootstrap is not None: metrics["n_bootstrap"] = args.n_bootstrap
     if args.seed is not None: metrics["seed"] = args.seed
+    if getattr(args, "n_samples", None) is not None: forecast["n_samples"] = args.n_samples
     out = {}
     if paths: out["paths"] = paths
     if inference: out["inference"] = inference
     if metrics: out["metrics"] = metrics
+    if forecast: out["forecast"] = forecast
     return out
 
 
@@ -95,6 +98,17 @@ def _cmd_demography(args):
     print(f"\nWrote demography tables + figures to {cfg.paths.out}/demography")
 
 
+def _cmd_forecast(args):
+    from . import pipelines
+    cfg = _load_cfg(args)
+    res = pipelines.run_forecast(cfg)
+    bt = res["backtest"]
+    if not bt.empty:
+        mae = bt["error"].abs().mean()
+        print(f"Backtest CCF mean abs error: {mae:.3f} over {len(bt)} (cohort × truncation) cells")
+    print(f"Wrote forecast (completed + backtest) tables + figures to {cfg.paths.out}/forecast")
+
+
 def _cmd_all(args):
     from . import pipelines
     cfg = _load_cfg(args)
@@ -125,7 +139,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     for name, handler in (("auc", _cmd_auc), ("calibration", _cmd_calibration), ("all", _cmd_all),
-                          ("demography", _cmd_demography)):
+                          ("demography", _cmd_demography), ("forecast", _cmd_forecast)):
         p = sub.add_parser(name, help=f"run {name}")
         _add_common(p)
         p.set_defaults(func=handler)

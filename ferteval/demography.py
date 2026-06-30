@@ -171,19 +171,19 @@ def time_to_event(fd: FertilityData, transition: int = 0, by_cohort: bool = True
 
 def _duration_event(fd: FertilityData, transition: int):
     births = fd.births
-    nth = births[births["parity"] == transition + 1].set_index("woman_id")["age"]
-    prev = births[births["parity"] == transition].set_index("woman_id")["age"] if transition > 0 else None
+    nth = births[births["parity"] == transition + 1].groupby("woman_id")["age"].min().to_dict()
+    prev = births[births["parity"] == transition].groupby("woman_id")["age"].min().to_dict() if transition > 0 else None
     dur, ev, coh = [], [], []
-    for _, w in fd.women.iterrows():
-        wid = w["woman_id"]
-        if transition > 0 and (prev is None or wid not in prev.index):
+    for w in fd.women.itertuples(index=False):
+        wid = w.woman_id
+        if transition > 0 and wid not in prev:
             continue  # never reached the starting parity → not at risk
-        start = float(prev.loc[wid]) if (transition > 0) else float(w["entry_age"])
-        if wid in nth.index:
-            dur.append(float(nth.loc[wid]) - start); ev.append(1)
+        start = float(prev[wid]) if transition > 0 else float(w.entry_age)
+        if wid in nth:
+            dur.append(float(nth[wid]) - start); ev.append(1)
         else:
-            dur.append(float(w["exit_age"]) - start); ev.append(0)
-        coh.append(int(w["cohort"]))
+            dur.append(float(w.exit_age) - start); ev.append(0)
+        coh.append(int(w.cohort))
     return np.array(dur), np.array(ev), np.array(coh)
 
 

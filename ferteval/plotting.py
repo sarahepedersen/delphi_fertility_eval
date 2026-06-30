@@ -192,6 +192,42 @@ def plot_lexis_surface(lexis: pd.DataFrame, out_path, title="First-birth intensi
     return _save(fig, out_path)
 
 
+def plot_ccf_completed(ccf_obs: pd.DataFrame, ccf_full: pd.DataFrame, out_path,
+                       title="CCF: observed + model forecast") -> "Path | None":
+    """Per cohort: solid observed CCF, dashed model-forecast continuation past the cutoff."""
+    if ccf_full.empty:
+        return None
+    obs = ccf_obs.set_index(["cohort", "age"])
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    for cohort, g in ccf_full.groupby("cohort"):
+        g = g.sort_values("age")
+        observed_flag = [bool(obs["observed"].get((cohort, a), False)) for a in g["age"]]
+        g = g.assign(obs=observed_flag)
+        solid = g[g["obs"]]
+        (line,) = ax.plot(solid["age"], solid["ccf"], label=f"{int(cohort)}")
+        if (~g["obs"]).any():  # forecast continuation, anchored at the last observed point
+            tail = g.loc[solid.index.max():] if not solid.empty else g
+            ax.plot(tail["age"], tail["ccf"], ls="--", color=line.get_color())
+    ax.set_xlabel("Age"); ax.set_ylabel("Cumulated births / woman"); ax.set_title(title)
+    ax.legend(title="cohort", fontsize=7, ncol=2)
+    return _save(fig, out_path)
+
+
+def plot_backtest_ccf(bt: pd.DataFrame, out_path, title="Backtest: forecast vs observed CCF") -> "Path | None":
+    """Scatter of forecast vs observed completed CCF, one colour per truncation age."""
+    if bt.empty:
+        return None
+    fig, ax = plt.subplots(figsize=(5.5, 5.5))
+    lo = min(bt["ccf_observed"].min(), bt["ccf_forecast"].min())
+    hi = max(bt["ccf_observed"].max(), bt["ccf_forecast"].max())
+    ax.plot([lo, hi], [lo, hi], ls="--", c="grey", lw=1, label="perfect")
+    for age, g in bt.groupby("truncation_age"):
+        ax.scatter(g["ccf_observed"], g["ccf_forecast"], label=f"trunc @ {int(age)}")
+    ax.set_xlabel("Observed CCF"); ax.set_ylabel("Forecast CCF"); ax.set_title(title)
+    ax.legend(fontsize=8)
+    return _save(fig, out_path)
+
+
 def plot_observed_vs_forecast(df, x, y, out_path, group="source", title="Observed vs forecast") -> "Path | None":
     """Generic overlay: same metric, one line per source (observed / forecast)."""
     if df.empty:

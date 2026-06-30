@@ -16,8 +16,9 @@ from . import calibration as calib
 from . import demography as demog
 from . import metrics_auc as M
 from . import plotting
+from . import sampling
 from .config import EvalConfig
-from .extraction import FertilityData
+from .extraction import FertilityData, merge
 from .inference import InferenceResult, run_inference
 from .loaders import load_data, load_model
 from .vocab import TokenVocab
@@ -187,6 +188,71 @@ def run_demography(cfg: EvalConfig, fd: FertilityData | None = None) -> dict:
     plotting.plot_lexis_surface(tables["lexis_first_birth"], out / "lexis_first_birth.png")
 
     return {"fertility_data": fd, "tables": tables}
+
+
+# --------------------------------------------------------------------------- #
+# Forecasting: complete incomplete cohorts + backtest                          #
+# --------------------------------------------------------------------------- #
+def run_forecast(cfg: EvalConfig, bundle=None, vocab: TokenVocab | None = None) -> dict:
+    """Complete incomplete cohorts with the model, fill the CCF tail / Lexis corner, and
+    backtest forecast accuracy on already-completed cohorts."""
+    cfg.require_paths("delphi_repo", "ckpt", "data")
+    vocab = vocab or TokenVocab.from_config(cfg)
+    bundle = bundle or load_model(cfg)
+    data = load_data(cfg.paths.data)
+    dg = cfg.demography
+    fc = sampling.ForecastConfig.from_cfg(cfg)
+
+    observed = FertilityData.from_bin(data, vocab, dg.completion_age, (dg.repro_age_min, dg.repro_age_max))
+    forecast = sampling.forecast_incomplete(cfg, bundle, vocab, observed, data, fc)
+    completed = merge(observed, forecast)
+
+    out = Path(cfg.paths.out) / "forecast"
+    tables = demog.run_all(completed, dg.selected_years, dg.max_parity)
+    for name, df in tables.items():
+        _write_table(df, out / f"completed__{name}")
+
+    # observed → completed CCF overlay (forecast fills the dashed tail)
+    ccf_obs = demog.ccf_curve(observed)
+    ccf_full = demog.ccf_curve(completed)
+    plotting.plot_ccf_completed(ccf_obs, ccf_full, out / "ccf_observed_vs_completed.png")
+    plotting.plot_lexis_surface(tables["lexis_first_birth"], out / "lexis_completed.png",
+                                title="First-birth intensity (observed + forecast)")
+
+    backtest = _backtest(cfg, bundle, vocab, data, observed, fc)
+    _write_table(backtest, out / "backtest_ccf")
+    plotting.plot_backtest_ccf(backtest, out / "backtest_ccf.png")
+
+    return {"observed": observed, "forecast": forecast, "completed": completed,
+            "tables": tables, "backtest": backtest}
+
+
+def _backtest(cfg: EvalConfig, bundle, vocab: TokenVocab, data, observed: FertilityData,
+              fc) -> pd.DataFrame:
+    """Truncate completed cohorts at each cutoff age, forecast forward, compare CCF to truth."""
+    dg = cfg.demography
+    obs_ccf = demog.completed_cohort_fertility(observed)
+    complete_cohorts = set(obs_ccf.loc[obs_ccf["fully_observed"], "cohort"])
+    obs_lookup = obs_ccf.set_index("cohort")["ccf"]
+    w = observed.women
+    complete_women = w[((~w["censored"]) | (w["exit_age"] >= dg.completion_age)) & w["cohort"].isin(complete_cohorts)]
+
+    rows = []
+    for k, age in enumerate(cfg.forecast.backtest_truncation_ages):
+        ids = complete_women["woman_id"].tolist()
+        if not ids:
+            continue
+        seeds = sampling.build_seeds(data, vocab, woman_ids=ids, truncate_age=age)
+        rng = np.random.default_rng(fc.seed + k + 1)
+        trajs = sampling.forecast_sequences(bundle, vocab, seeds, fc, rng)
+        fcfd = FertilityData.from_sequences(trajs, vocab, dg.completion_age, (dg.repro_age_min, dg.repro_age_max))
+        fc_ccf = demog.completed_cohort_fertility(fcfd).set_index("cohort")["ccf"]
+        for cohort in sorted(complete_cohorts):
+            if cohort in fc_ccf.index:
+                obs_v, fc_v = float(obs_lookup[cohort]), float(fc_ccf[cohort])
+                rows.append({"truncation_age": age, "cohort": int(cohort),
+                             "ccf_observed": obs_v, "ccf_forecast": fc_v, "error": fc_v - obs_v})
+    return pd.DataFrame(rows)
 
 
 # --------------------------------------------------------------------------- #
