@@ -29,6 +29,7 @@ def build_meta_from_labels(
     id_column: str | None = None,
     id_start: int = 0,
     has_header: bool | None = None,
+    whole_line: bool = False,
 ) -> dict:
     """Build a ``{stoi, itos, vocab_size}`` dict from a labels file.
 
@@ -40,11 +41,15 @@ def build_meta_from_labels(
             by row order starting at ``id_start``.
         id_start: first id when assigning by row order (default 0).
         has_header: force header on/off. ``None`` auto-detects.
+        whole_line: treat each *entire* (stripped) line as one token name, with no
+            delimiter splitting. Use this when token names themselves contain spaces
+            (e.g. ``"no event"``) — otherwise whitespace splitting keeps only the first
+            word. Ignored when ``id_column``/CSV columns are needed.
 
     Returns:
         dict with ``stoi``, ``itos``, ``vocab_size``.
     """
-    rows, header = _read_rows(Path(labels_path), has_header)
+    rows, header = _read_rows(Path(labels_path), has_header, whole_line=whole_line)
     if not rows:
         raise ValueError(f"{labels_path}: no data rows found.")
 
@@ -79,15 +84,16 @@ def write_meta(meta: dict, out_path: str | Path) -> Path:
 # --------------------------------------------------------------------------- #
 # parsing helpers                                                              #
 # --------------------------------------------------------------------------- #
-def _read_rows(path: Path, has_header: bool | None) -> tuple[list[list[str]], list[str] | None]:
+def _read_rows(path: Path, has_header: bool | None, whole_line: bool = False) -> tuple[list[list[str]], list[str] | None]:
     """Read the labels file into rows + optional header, sniffing the delimiter."""
     text = path.read_text().splitlines()
     lines = [ln for ln in text if ln.strip() != ""]
     if not lines:
         return [], None
 
-    is_comma = "," in lines[0]
-    if is_comma:
+    if whole_line:
+        parsed = [[ln.strip()] for ln in lines]  # each full line = one token name
+    elif "," in lines[0]:
         parsed = list(csv.reader(lines))
     else:
         parsed = [ln.split() for ln in lines]  # whitespace-delimited (upstream style)
@@ -150,6 +156,10 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--has-header", choices=["auto", "yes", "no"], default="auto", help="Whether the file has a header row"
     )
+    parser.add_argument(
+        "--whole-line", action="store_true",
+        help="Treat each full line as one token name (use when names contain spaces, e.g. 'no event')",
+    )
 
 
 def run(args: argparse.Namespace) -> dict:
@@ -160,6 +170,7 @@ def run(args: argparse.Namespace) -> dict:
         id_column=args.id_column,
         id_start=args.id_start,
         has_header=has_header,
+        whole_line=getattr(args, "whole_line", False),
     )
     out = write_meta(meta, args.out)
     print(f"Wrote {out} — vocab_size={meta['vocab_size']}, {len(meta['stoi'])} named tokens.")
