@@ -37,13 +37,14 @@ class ForecastConfig:
     age_cap_years: float = 55.0   # hard stop
     max_steps: int = 80           # safety cap on rollout length
     temperature: float = 1.0
+    batch_size: int = 128         # trajectories per forward (bounds GPU memory)
     seed: int = 1337
 
     @classmethod
     def from_cfg(cls, cfg: EvalConfig) -> "ForecastConfig":
         f = cfg.forecast
         return cls(n_samples=f.n_samples, max_age_years=f.max_age, age_cap_years=f.age_cap,
-                   temperature=f.temperature, seed=cfg.metrics.seed)
+                   temperature=f.temperature, batch_size=cfg.inference.batch_size, seed=cfg.metrics.seed)
 
 
 # --------------------------------------------------------------------------- #
@@ -101,7 +102,7 @@ def forecast_sequences(bundle: DelphiBundle, vocab: TokenVocab, seeds, fc: Forec
             active = [t for t in trajs if t["active"]]
             if not active:
                 break
-            last_logits, last_age = _forward_last(active, model, torch, device, block, pad)
+            last_logits, last_age = _forward_last(active, model, torch, device, block, pad, fc.batch_size)
             last_logits[:, list(blocked)] = -np.inf
             if fc.temperature != 1.0:
                 last_logits = last_logits / fc.temperature
@@ -124,22 +125,36 @@ def forecast_sequences(bundle: DelphiBundle, vocab: TokenVocab, seeds, fc: Forec
     return [(t["id"], np.array(t["tok"], dtype=np.int64), np.array(t["age"], dtype=np.float64)) for t in trajs]
 
 
-def _forward_last(active, model, torch, device, block, pad):
-    """Forward the batch and return (last-position logits [B,V] numpy, last age [B] days)."""
-    Lw = min(max(len(t["tok"]) for t in active), block)
-    B = len(active)
-    idx = torch.full((B, Lw), pad, dtype=torch.long)
-    age = torch.zeros((B, Lw), dtype=torch.float32)
-    last_pos, last_age = [], []
-    for i, t in enumerate(active):
-        tk, ag = t["tok"][-Lw:], t["age"][-Lw:]
-        idx[i, :len(tk)] = torch.tensor(tk, dtype=torch.long)
-        age[i, :len(ag)] = torch.tensor(ag, dtype=torch.float32)
-        last_pos.append(len(tk) - 1)
-        last_age.append(t["age"][-1])
-    logits = model(idx.to(device), age.to(device))[0]                      # (B, Lw, V)
-    sel = logits[torch.arange(B), torch.tensor(last_pos)].float().cpu().numpy()
-    return sel, np.array(last_age, dtype=np.float64)
+def _forward_last(active, model, torch, device, block, pad, batch_size):
+    """Forward the active trajectories in mini-batches; return (last-position logits [B,V]
+    numpy, last age [B] days).
+
+    Chunking bounds GPU memory: a single forward over *all* trajectories would allocate a
+    logits tensor — and the model's full attention tensor ``(n_layer, B, n_head, T, T)`` —
+    sized by the total trajectory count (incomplete women × n_samples), which OOMs. We
+    process ``batch_size`` trajectories at a time and keep only the last-position logits.
+    """
+    logits_out, age_out = [], []
+    bs = max(1, int(batch_size))
+    for start in range(0, len(active), bs):
+        chunk = active[start:start + bs]
+        Lw = min(max(len(t["tok"]) for t in chunk), block)
+        B = len(chunk)
+        idx = torch.full((B, Lw), pad, dtype=torch.long)
+        age = torch.zeros((B, Lw), dtype=torch.float32)
+        last_pos = []
+        for j, t in enumerate(chunk):
+            tk, ag = t["tok"][-Lw:], t["age"][-Lw:]
+            idx[j, :len(tk)] = torch.tensor(tk, dtype=torch.long)
+            age[j, :len(ag)] = torch.tensor(ag, dtype=torch.float32)
+            last_pos.append(len(tk) - 1)
+            age_out.append(t["age"][-1])
+        out = model(idx.to(device), age.to(device))[0]                     # (B, Lw, V)
+        rows = torch.arange(B, device=out.device)
+        cols = torch.tensor(last_pos, device=out.device)
+        logits_out.append(out[rows, cols].float().cpu().numpy())           # (B, V)
+        del out
+    return np.concatenate(logits_out, axis=0), np.array(age_out, dtype=np.float64)
 
 
 def _competing_exponential(logits: np.ndarray, rng: np.random.Generator):

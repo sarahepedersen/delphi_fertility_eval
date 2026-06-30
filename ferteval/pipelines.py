@@ -106,7 +106,7 @@ def _auc_event_specs(cfg: EvalConfig, vocab: TokenVocab):
     if cfg.metrics.auc_child_sex and vocab.child_son_id is not None and vocab.child_daughter_id is not None:
         son, dau = vocab.child_son_id, vocab.child_daughter_id
         specs.append(("child_sex (son vs daughter)",
-                      lambda r, s, son=son, dau=dau: M.build_child_sex_rows(r, son, dau)))
+                      lambda r, _s, son=son, dau=dau: M.build_child_sex_rows(r, son, dau)))
 
     return specs
 
