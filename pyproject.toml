@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ferteval"
+version = "0.1.0"
+description = "Evaluation suite for Delphi-style fertility-sequence models (AUC, cohort calibration, and demographic measures)."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "pandas>=2.0",
+    "scipy>=1.10",
+    "matplotlib>=3.6",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+# torch is needed to load checkpoints and run model inference. It is intentionally
+# optional so that the pure-numpy metrics (AUC / calibration) can be unit-tested
+# without a torch install. Install it in the same env as your Delphi fork.
+torch = ["torch>=2.0"]
+parquet = ["pyarrow>=12.0"]
+test = ["pytest>=7.0"]
+
+[project.scripts]
+ferteval = "ferteval.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["ferteval*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]

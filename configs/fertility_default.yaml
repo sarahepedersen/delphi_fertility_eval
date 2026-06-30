@@ -1,0 +1,84 @@
+# Default configuration for the Delphi fertility evaluation suite.
+#
+# Every field can be overridden on the command line (see `python -m ferteval.cli --help`).
+# Paths are intentionally left null here — pass them via the CLI so this file stays
+# machine-independent and check-in-able.
+
+paths:
+  delphi_repo: null      # path to YOUR Delphi fork (must contain model.py + utils.py)
+  ckpt: null             # path to the trained checkpoint (.pt) produced like Delphi-2M
+  data: null             # path to the eval sequences (.bin, uint32 [patient_id, age_days, token_id])
+  meta: null             # path to meta.pkl (token name <-> id map). Optional if token_ids given below.
+  labels_csv: null       # optional CSV with extra per-token metadata (name, count, ...)
+  out: reports/run       # output directory for tables + figures
+
+# ---------------------------------------------------------------------------
+# Token resolution. Values are TOKEN NAMES as they appear in meta.pkl's stoi map.
+# Leave a field null to fall back to name-pattern auto-detection (see vocab.py).
+# If your meta.pkl is unavailable, set the *_id variants under `token_ids` instead.
+# ---------------------------------------------------------------------------
+tokens:
+  # Names that count as a live birth. One entry for the single-CHILD model,
+  # two for the CHILD_SON / CHILD_DAUGHTER model.
+  child: ["CHILD"]
+  child_son: null         # e.g. "CHILD_SON"   (enables child-sex AUC if both set)
+  child_daughter: null    # e.g. "CHILD_DAUGHTER"
+  no_event: "no_event"    # yearly background token
+  end_sequence: "death"   # end-of-sequence / death token
+  padding: "padding"      # padding token (ignored in metrics)
+  censoring: "censoring"  # right-censoring token
+  # BIRTH_year tokens encode the woman's birth cohort. Either give an explicit list,
+  # or a prefix + regex used to extract the 4-digit year from each matching token name.
+  birth_year_prefix: "BIRTH_"
+  birth_year_regex: '(\d{4})'
+
+# Optional: pin token ids directly (bypasses meta.pkl name lookup). Same keys as
+# above; values are ints or lists of ints. Anything left null is resolved by name.
+token_ids: {}
+
+# ---------------------------------------------------------------------------
+# Subgroup definitions for discrimination + calibration.
+# ---------------------------------------------------------------------------
+bins:
+  age:
+    min: 15
+    max: 50
+    step: 5
+  cohort:
+    # Birth-year cohort bracket edges. If `edges` is null, brackets are built from
+    # min/max/step. Ages and cohorts are both stratified for subgroup AUC/calibration.
+    edges: null
+    min: 1930
+    max: 1990
+    step: 10
+
+# ---------------------------------------------------------------------------
+# Inference / batching. These mirror the upstream get_batch + evaluate_auc_pipeline.
+# ---------------------------------------------------------------------------
+inference:
+  device: auto            # auto | cpu | cuda | mps
+  block_size: 80
+  batch_size: 128
+  select: left            # passed to get_batch
+  padding_mode: random    # passed to get_batch (padding=...)
+  no_event_token_rate: 1  # yearly background tokens for the fertility model
+  # Days before the event at which the prediction is read (last input step strictly
+  # before event_age - offset_days). 365.25 = "one-year-ahead" hazard.
+  offset_days: 365.25
+  dataset_subset_size: -1 # -1 = all patients
+  # Extra kwargs forwarded verbatim to YOUR get_batch (handles signature drift,
+  # e.g. health_token_replacement_prob: 0.0).
+  get_batch_kwargs: {}
+
+# ---------------------------------------------------------------------------
+# Metrics.
+# ---------------------------------------------------------------------------
+metrics:
+  seed: 1337
+  n_bootstrap: 1000       # resampling-bootstrap replicates for AUC SE + percentile CIs (CPU)
+  # Which AUC targets to compute.
+  auc_first_birth: true   # discrimination for first birth (case vs nulliparous)
+  auc_parity_progression: true  # n -> n+1 progression, among women who reached parity n
+  max_parity: 5           # highest parity transition to evaluate (n -> n+1 for n in 0..max)
+  auc_child_sex: false    # son vs daughter AUC (requires child_son & child_daughter set)
+  calibration_n_bins: 10  # reliability-curve deciles
