@@ -53,7 +53,7 @@ def build_meta_from_labels(
     if not rows:
         raise ValueError(f"{labels_path}: no data rows found.")
 
-    name_idx, id_idx = _resolve_columns(header, rows[0], name_column, id_column)
+    name_idx, id_idx = _resolve_columns(header, name_column, id_column)
 
     stoi: dict[str, int] = {}
     itos: dict[int, str] = {}
@@ -112,7 +112,6 @@ def _looks_like_header(first_row: list[str]) -> bool:
 
 def _resolve_columns(
     header: list[str] | None,
-    first_row: list[str],
     name_column: str | None,
     id_column: str | None,
 ) -> tuple[int, int | None]:

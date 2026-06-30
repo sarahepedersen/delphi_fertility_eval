@@ -82,3 +82,26 @@ metrics:
   max_parity: 5           # highest parity transition to evaluate (n -> n+1 for n in 0..max)
   auc_child_sex: false    # son vs daughter AUC (requires child_son & child_daughter set)
   calibration_n_bins: 10  # reliability-curve deciles
+
+# ---------------------------------------------------------------------------
+# Demographic estimators (phase 2: `ferteval.cli demography`).
+# ---------------------------------------------------------------------------
+demography:
+  selected_years: [1975, 2000, 2024]  # period years for the age × parity surface
+  max_parity: 6
+  completion_age: 50.0                 # age past which childbearing is treated as complete
+  repro_age_min: 15
+  repro_age_max: 50
+  period_min: null                     # null => data-driven calendar-year range
+  period_max: null
+
+# ---------------------------------------------------------------------------
+# Forecasting engine (phase 2: `ferteval.cli forecast`) — completes incomplete
+# cohorts and backtests against held-out completions.
+# ---------------------------------------------------------------------------
+forecast:
+  n_samples: 25            # Monte-Carlo trajectories per incomplete woman
+  max_age: 50.0            # roll forward until this age (or death)
+  age_cap: 55.0            # hard stop for the rollout
+  temperature: 1.0
+  backtest_truncation_ages: [30, 35, 40]  # truncate completed cohorts here, forecast, compare

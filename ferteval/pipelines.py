@@ -13,11 +13,13 @@ import numpy as np
 import pandas as pd
 
 from . import calibration as calib
+from . import demography as demog
 from . import metrics_auc as M
 from . import plotting
 from .config import EvalConfig
+from .extraction import FertilityData
 from .inference import InferenceResult, run_inference
-from .loaders import load_model
+from .loaders import load_data, load_model
 from .vocab import TokenVocab
 
 
@@ -150,6 +152,41 @@ def run_calibration(cfg: EvalConfig, result: InferenceResult | None = None, voca
     plotting.plot_reliability_by_cohort(cohort_curves, out / "reliability_by_cohort.png")
 
     return {"reliability": reliability, "by_cohort": per_cohort, "overall": overall}
+
+
+# --------------------------------------------------------------------------- #
+# Demography (observed)                                                         #
+# --------------------------------------------------------------------------- #
+def run_demography(cfg: EvalConfig, fd: FertilityData | None = None) -> dict:
+    """Extract observed FertilityData, compute every estimator, write tables + figures."""
+    if fd is None:
+        cfg.require_paths("data")
+        vocab = TokenVocab.from_config(cfg)
+        data = load_data(cfg.paths.data)
+        fd = FertilityData.from_bin(
+            data, vocab,
+            completion_age=cfg.demography.completion_age,
+            repro_ages=(cfg.demography.repro_age_min, cfg.demography.repro_age_max),
+        )
+
+    dg = cfg.demography
+    tables = demog.run_all(fd, dg.selected_years, dg.max_parity)
+
+    out = Path(cfg.paths.out) / "demography"
+    for name, df in tables.items():
+        _write_table(df, out / name)
+
+    # figures
+    plotting.plot_ccf_by_cohort(tables["ccf_curve"], out / "ccf_by_cohort.png")
+    plotting.plot_ppr(tables["parity_progression_ratios"], out / "ppr.png")
+    plotting.plot_km_survival(tables["time_to_first_birth"], out / "time_to_first_birth.png")
+    plotting.plot_mab1_timeseries(tables["mean_age_first_birth"], out / "mean_age_first_birth.png")
+    plotting.plot_asfr(tables["asfr"], out / "asfr.png")
+    plotting.plot_age_parity_surface(tables["age_parity_surface"], out)
+    plotting.plot_birth_order_age_profile(tables["birth_order_age_profile"], out / "birth_order_age_profile.png")
+    plotting.plot_lexis_surface(tables["lexis_first_birth"], out / "lexis_first_birth.png")
+
+    return {"fertility_data": fd, "tables": tables}
 
 
 # --------------------------------------------------------------------------- #

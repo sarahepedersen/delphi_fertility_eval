@@ -84,3 +84,121 @@ def _save(fig, out_path: str | Path) -> Path:
     fig.savefig(out, dpi=150)
     plt.close(fig)
     return out
+
+
+# =========================================================================== #
+# Demographic figures (phase 2)                                               #
+# =========================================================================== #
+def plot_ccf_by_cohort(ccf: pd.DataFrame, out_path, title="Cumulated cohort fertility") -> "Path | None":
+    """CCF(age) per cohort; solid over observed ages, dashed once exposure runs out."""
+    if ccf.empty:
+        return None
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    for cohort, g in ccf.groupby("cohort"):
+        g = g.sort_values("age").reset_index(drop=True)
+        obs = g[g["observed"]]
+        (line,) = ax.plot(obs["age"], obs["ccf"], label=f"{int(cohort)}")
+        if (~g["observed"]).any():  # forecast / unobserved tail — start it at the last observed point
+            tail = g.loc[obs.index.max():] if not obs.empty else g
+            ax.plot(tail["age"], tail["ccf"], ls="--", color=line.get_color())
+    ax.set_xlabel("Age"); ax.set_ylabel("Cumulated births / woman"); ax.set_title(title)
+    ax.legend(title="cohort", fontsize=7, ncol=2)
+    return _save(fig, out_path)
+
+
+def plot_ppr(ppr: pd.DataFrame, out_path, title="Parity progression ratios") -> "Path | None":
+    if ppr.empty:
+        return None
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    for cohort, g in ppr.groupby("cohort"):
+        g = g.sort_values("n")
+        ax.plot(g["n"], g["ppr"], marker="o", label=f"{int(cohort)}")
+    ax.set_xlabel("Parity n (n→n+1)"); ax.set_ylabel("PPR"); ax.set_ylim(0, 1.05); ax.set_title(title)
+    ax.legend(title="cohort", fontsize=7, ncol=2)
+    return _save(fig, out_path)
+
+
+def plot_km_survival(km: pd.DataFrame, out_path, title="Time to first birth (KM)") -> "Path | None":
+    if km.empty:
+        return None
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    for cohort, g in km.groupby("cohort"):
+        g = g.sort_values("age")
+        ax.step(g["age"], g["survival"], where="post", label=f"{int(cohort)}")
+    ax.set_xlabel("Age"); ax.set_ylabel("P(no birth yet)"); ax.set_ylim(0, 1.02); ax.set_title(title)
+    ax.legend(title="cohort", fontsize=7, ncol=2)
+    return _save(fig, out_path)
+
+
+def plot_mab1_timeseries(mab: pd.DataFrame, out_path, x="period", title="Mean age at first birth") -> "Path | None":
+    if mab.empty:
+        return None
+    fig, ax = plt.subplots(figsize=(8, 4))
+    g = mab.sort_values(x)
+    ax.plot(g[x], g["mean_age"], marker=".")
+    ax.set_xlabel("Calendar year" if x == "period" else "Cohort"); ax.set_ylabel("Mean age (yrs)")
+    ax.set_title(title)
+    return _save(fig, out_path)
+
+
+def plot_asfr(asfr: pd.DataFrame, out_path, periods=None, title="ASFR by age") -> "Path | None":
+    if asfr.empty:
+        return None
+    avail = sorted(asfr["period"].unique())
+    periods = periods or avail[:: max(1, len(avail) // 6)]  # show ~6 schedules
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    for yr in periods:
+        g = asfr[asfr["period"] == yr].sort_values("age")
+        ax.plot(g["age"], g["asfr"], label=f"{int(yr)}")
+    ax.set_xlabel("Age"); ax.set_ylabel("ASFR"); ax.set_title(title)
+    ax.legend(title="year", fontsize=7, ncol=2)
+    return _save(fig, out_path)
+
+
+def plot_age_parity_surface(surface: pd.DataFrame, out_dir, prefix="age_parity") -> list:
+    """One heatmap (age × parity) per selected year."""
+    paths = []
+    for year, g in surface.groupby("year"):
+        grid = g.pivot_table(index="parity", columns="age", values="rate")
+        fig, ax = plt.subplots(figsize=(7, 3.8))
+        im = ax.pcolormesh(grid.columns, grid.index, grid.to_numpy(), shading="nearest")
+        fig.colorbar(im, ax=ax, label="rate")
+        ax.set_xlabel("Age"); ax.set_ylabel("Parity (entered)"); ax.set_title(f"Age × parity rate, {int(year)}")
+        paths.append(_save(fig, f"{out_dir}/{prefix}__{int(year)}.png"))
+    return paths
+
+
+def plot_birth_order_age_profile(prof: pd.DataFrame, out_path, title="Age profile of birth order") -> "Path | None":
+    if prof.empty:
+        return None
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    for order, g in prof.groupby("order"):
+        g = g.sort_values("age")
+        ax.plot(g["age"], g["density"], label=f"order {int(order)}")
+    ax.set_xlabel("Age"); ax.set_ylabel("Share of births"); ax.set_title(title)
+    ax.legend(fontsize=7)
+    return _save(fig, out_path)
+
+
+def plot_lexis_surface(lexis: pd.DataFrame, out_path, title="First-birth intensity (Lexis)") -> "Path | None":
+    """Heatmap cohort (x) × age (y) of first-birth intensity; unobserved cells left blank."""
+    if lexis.empty:
+        return None
+    grid = lexis.pivot_table(index="age", columns="cohort", values="intensity")
+    fig, ax = plt.subplots(figsize=(7.5, 5))
+    im = ax.pcolormesh(grid.columns, grid.index, grid.to_numpy(), shading="nearest")
+    fig.colorbar(im, ax=ax, label="first-birth intensity")
+    ax.set_xlabel("Birth cohort"); ax.set_ylabel("Age"); ax.set_title(title)
+    return _save(fig, out_path)
+
+
+def plot_observed_vs_forecast(df, x, y, out_path, group="source", title="Observed vs forecast") -> "Path | None":
+    """Generic overlay: same metric, one line per source (observed / forecast)."""
+    if df.empty:
+        return None
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    for src, g in df.groupby(group):
+        g = g.sort_values(x)
+        ax.plot(g[x], g[y], marker=".", label=str(src))
+    ax.set_xlabel(x); ax.set_ylabel(y); ax.set_title(title); ax.legend(fontsize=8)
+    return _save(fig, out_path)

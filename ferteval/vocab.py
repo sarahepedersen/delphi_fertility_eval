@@ -228,7 +228,7 @@ def _lookup(name_to_id: dict[str, int], name: str, logical: str) -> int:
     raise ValueError(
         f"Token name {name!r} (for logical '{logical}') not found in the vocabulary. "
         f"Set tokens.{logical} to the correct name or pin token_ids.{logical}. "
-        f"Available example names: {sorted(name_to_id)[:12]}..."
+        f"Available names ({len(name_to_id)}): {sorted(name_to_id)}"
     )
 
 

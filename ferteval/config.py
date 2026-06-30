@@ -97,6 +97,26 @@ class Metrics:
 
 
 @dataclass
+class Demography:
+    selected_years: list[int] = field(default_factory=lambda: [1975, 2000, 2024])
+    max_parity: int = 6
+    completion_age: float = 50.0
+    repro_age_min: int = 15
+    repro_age_max: int = 50
+    period_min: int | None = None  # None => data-driven
+    period_max: int | None = None
+
+
+@dataclass
+class Forecast:
+    n_samples: int = 25
+    max_age: float = 50.0
+    age_cap: float = 55.0
+    temperature: float = 1.0
+    backtest_truncation_ages: list[int] = field(default_factory=lambda: [30, 35, 40])
+
+
+@dataclass
 class EvalConfig:
     paths: Paths = field(default_factory=Paths)
     tokens: Tokens = field(default_factory=Tokens)
@@ -104,6 +124,8 @@ class EvalConfig:
     bins: Bins = field(default_factory=Bins)
     inference: Inference = field(default_factory=Inference)
     metrics: Metrics = field(default_factory=Metrics)
+    demography: Demography = field(default_factory=Demography)
+    forecast: Forecast = field(default_factory=Forecast)
 
     # ------------------------------------------------------------------ #
     # Construction                                                       #
@@ -131,6 +153,8 @@ class EvalConfig:
             ),
             inference=Inference(**(d.get("inference") or {})),
             metrics=Metrics(**(d.get("metrics") or {})),
+            demography=Demography(**(d.get("demography") or {})),
+            forecast=Forecast(**(d.get("forecast") or {})),
         )
 
     # ------------------------------------------------------------------ #

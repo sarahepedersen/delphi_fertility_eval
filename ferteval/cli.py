@@ -83,6 +83,18 @@ def _cmd_calibration(args):
     print(res["overall"].to_string(index=False))
 
 
+def _cmd_demography(args):
+    from . import pipelines
+    cfg = _load_cfg(args)
+    res = pipelines.run_demography(cfg)
+    tables = res["tables"]
+    ccf = tables["completed_cohort_fertility"]
+    if not ccf.empty:
+        print("Completed cohort fertility (final CCF by cohort):")
+        print(ccf.to_string(index=False))
+    print(f"\nWrote demography tables + figures to {cfg.paths.out}/demography")
+
+
 def _cmd_all(args):
     from . import pipelines
     cfg = _load_cfg(args)
@@ -112,7 +124,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="ferteval", description="Delphi fertility evaluation suite")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    for name, handler in (("auc", _cmd_auc), ("calibration", _cmd_calibration), ("all", _cmd_all)):
+    for name, handler in (("auc", _cmd_auc), ("calibration", _cmd_calibration), ("all", _cmd_all),
+                          ("demography", _cmd_demography)):
         p = sub.add_parser(name, help=f"run {name}")
         _add_common(p)
         p.set_defaults(func=handler)

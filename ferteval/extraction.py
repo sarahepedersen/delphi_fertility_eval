@@ -1,0 +1,185 @@
+"""Shared fertility data substrate.
+
+Every demographic estimator consumes one object — :class:`FertilityData` — so the same
+code path serves observed sequences and model-forecasted sequences. It holds three tidy
+tables:
+
+* ``women``    — one row per woman (cohort, entry/exit, censoring, final parity).
+* ``births``   — one row per birth (parity / birth order, age, calendar period).
+* ``exposure`` — one row per observed woman-year (the denominators for rates), tagged with
+  the parity entering that age. ``period = cohort + age`` throughout (Lexis identity).
+
+The crucial distinction for forecasting: a woman who reaches the ``death`` token is
+**complete** (out of risk); a woman who ends on ``censoring`` while still under the
+completion age is **incomplete** — her childbearing is unfinished and she is the unit the
+forecasting engine rolls forward.
+
+Extraction needs only ``data`` + a :class:`~ferteval.vocab.TokenVocab` — not the model — so
+the observed-data demography pipeline runs without the Delphi fork or a checkpoint.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import numpy as np
+import pandas as pd
+
+from .vocab import TokenVocab
+
+DAYS_PER_YEAR = 365.25
+
+
+@dataclass
+class FertilityData:
+    source: str               # 'observed' | 'forecast' | 'observed+forecast'
+    women: pd.DataFrame
+    births: pd.DataFrame
+    exposure: pd.DataFrame
+    completion_age: float = 50.0
+
+    # ------------------------------------------------------------------ #
+    # constructors                                                       #
+    # ------------------------------------------------------------------ #
+    @classmethod
+    def from_bin(cls, data: np.ndarray, vocab: TokenVocab, completion_age: float = 50.0,
+                 repro_ages: tuple[int, int] = (15, 50)) -> "FertilityData":
+        """Build from a real Delphi ``.bin`` array ``(N,3)`` = [pid, age_days, token_id]."""
+        p2i = _patient_index(data)
+        recs = []
+        for wid, (start, length) in enumerate(p2i):
+            rows = data[start:start + length]
+            recs.append(_extract_woman(wid, rows[:, 2], rows[:, 1], vocab, completion_age, repro_ages))
+        return _assemble(recs, "observed", completion_age)
+
+    @classmethod
+    def from_sequences(cls, sequences, vocab: TokenVocab, completion_age: float = 50.0,
+                       repro_ages: tuple[int, int] = (15, 50)) -> "FertilityData":
+        """Build from forecasted sequences: an iterable of ``(woman_id, tokens, ages_days)``."""
+        recs = [_extract_woman(wid, np.asarray(tokens), np.asarray(ages), vocab, completion_age, repro_ages)
+                for wid, tokens, ages in sequences]
+        return _assemble(recs, "forecast", completion_age)
+
+    # ------------------------------------------------------------------ #
+    # helpers                                                            #
+    # ------------------------------------------------------------------ #
+    @property
+    def incomplete_women(self) -> pd.DataFrame:
+        """Censored women still in the reproductive window — the forecast targets."""
+        w = self.women
+        return w[w["censored"] & (w["exit_age"] < self.completion_age)]
+
+    def cohorts(self) -> np.ndarray:
+        c = self.women["cohort"].to_numpy()
+        return np.unique(c[c >= 0])
+
+    def with_source(self, label: str) -> "FertilityData":
+        return FertilityData(label, self.women, self.births, self.exposure, self.completion_age)
+
+
+def merge(observed: FertilityData, forecast: FertilityData) -> FertilityData:
+    """Combine observed rows with forecast continuations into one dataset.
+
+    Forecast tables are expected to carry only the *added* rows (post-cutoff births /
+    woman-years) and updated ``women`` rows; we drop observed women that were re-forecast
+    and union the rest, so estimators see one completed dataset.
+    """
+    reforecast_ids = set(forecast.women["woman_id"])
+    keep = ~observed.women["woman_id"].isin(reforecast_ids)
+    women = pd.concat([observed.women[keep], forecast.women], ignore_index=True)
+    births = pd.concat([observed.births[observed.births["woman_id"].isin(set(women["woman_id"]))],
+                        forecast.births], ignore_index=True)
+    exposure = pd.concat([observed.exposure[observed.exposure["woman_id"].isin(set(women["woman_id"]))],
+                          forecast.exposure], ignore_index=True)
+    return FertilityData("observed+forecast", women, births, exposure, observed.completion_age)
+
+
+# --------------------------------------------------------------------------- #
+# per-woman extraction                                                         #
+# --------------------------------------------------------------------------- #
+def _extract_woman(wid, tokens, ages_days, vocab: TokenVocab, completion_age, repro_ages):
+    tokens = np.asarray(tokens).astype(np.int64)
+    ages = np.asarray(ages_days, dtype=np.float64) / DAYS_PER_YEAR
+
+    child_set = vocab.child_id_set
+    son, daughter = vocab.child_son_id, vocab.child_daughter_id
+    death_id, censor_id = vocab.end_sequence_id, vocab.censoring_id
+    by_map = vocab.birth_year_to_cohort
+
+    cohort = -1
+    for t in tokens:
+        if int(t) in by_map:
+            cohort = by_map[int(t)]
+            break
+
+    births, timeline_ages = [], []
+    exit_age, exit_reason, censored = None, "end_of_record", True
+    parity = 0
+    for t, a in zip(tokens, ages):
+        t = int(t)
+        if t in by_map:
+            continue  # the cohort marker is not a timeline event
+        timeline_ages.append(a)
+        if t in child_set:
+            parity += 1
+            sex = "son" if (son is not None and t == son) else ("daughter" if (daughter is not None and t == daughter) else None)
+            births.append((parity, a, sex))
+        if death_id is not None and t == death_id:
+            exit_age, exit_reason, censored = a, "death", False
+            break
+        if censor_id is not None and t == censor_id:
+            exit_age, exit_reason, censored = a, "censored", True
+            break
+
+    if exit_age is None:
+        exit_age = timeline_ages[-1] if timeline_ages else 0.0
+        exit_reason, censored = "end_of_record", True
+    entry_age = timeline_ages[0] if timeline_ages else 0.0
+
+    woman = {
+        "woman_id": wid, "cohort": cohort, "entry_age": entry_age, "exit_age": exit_age,
+        "exit_reason": exit_reason, "censored": censored, "final_parity": parity,
+    }
+    birth_rows = [
+        {"woman_id": wid, "cohort": cohort, "parity": p, "age": a,
+         "period": int(np.floor(cohort + a)) if cohort >= 0 else -1,
+         "period_exact": (cohort + a) if cohort >= 0 else np.nan, "child_sex": sex}
+        for (p, a, sex) in births
+    ]
+
+    lo, hi = repro_ages
+    birth_ages = sorted(a for (_, a, _) in births)
+    exp_rows = []
+    # Ages come from integer-day timestamps, so entry_age can sit a hair above its integer
+    # (e.g. 15.0007). Floor it so the woman is counted as exposed from her entry age-year.
+    floor_entry = int(np.floor(entry_age))
+    upper = min(exit_age, completion_age, hi)
+    for ag in range(int(lo), int(hi)):
+        if floor_entry <= ag < upper:
+            par = int(np.searchsorted(birth_ages, ag, side="left"))  # births strictly before age ag
+            exp_rows.append({"woman_id": wid, "cohort": cohort, "age": ag,
+                             "period": int(cohort + ag) if cohort >= 0 else -1, "parity_at_age": par})
+    return woman, birth_rows, exp_rows
+
+
+def _assemble(recs, source, completion_age) -> FertilityData:
+    women = pd.DataFrame([r[0] for r in recs])
+    births = pd.DataFrame([b for r in recs for b in r[1]],
+                          columns=["woman_id", "cohort", "parity", "age", "period", "period_exact", "child_sex"])
+    exposure = pd.DataFrame([e for r in recs for e in r[2]],
+                            columns=["woman_id", "cohort", "age", "period", "parity_at_age"])
+    for df in (women, births, exposure):
+        df["source"] = source
+    return FertilityData(source, women, births, exposure, completion_age)
+
+
+def _patient_index(data: np.ndarray) -> list[tuple[int, int]]:
+    """Contiguous (start, length) runs per patient id (data assumed grouped by pid)."""
+    pids = data[:, 0]
+    n = len(pids)
+    out, start = [], 0
+    for i in range(1, n + 1):
+        if i == n or pids[i] != pids[start]:
+            out.append((start, i - start))
+            start = i
+    return out
