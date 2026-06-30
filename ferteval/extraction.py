@@ -83,6 +83,29 @@ class FertilityData:
     def with_source(self, label: str) -> "FertilityData":
         return FertilityData(label, self.women, self.births, self.exposure, self.completion_age)
 
+    def binned_cohorts(self, edges) -> "FertilityData":
+        """Return a copy whose ``cohort`` column is replaced by its cohort-bin lower edge.
+
+        ``edges`` are bin boundaries (e.g. [1930, 1940, ...]); a birth year in [e_i, e_{i+1})
+        is relabelled to ``e_i``. Years outside [edges[0], edges[-1]) become -1 (which every
+        estimator drops). Used so CCF / PPR / time-to-event group by cohort *bin* rather than
+        by every individual birth year. period/period_exact columns are left untouched
+        (the cohort-family estimators don't use them).
+        """
+        edges = list(edges)
+        if len(edges) < 2:
+            return self
+        e = np.asarray(edges)
+
+        def remap(df):
+            c = df["cohort"].to_numpy()
+            idx = np.clip(np.digitize(c, e) - 1, 0, len(e) - 2)
+            binned = np.where((c >= e[0]) & (c < e[-1]), e[idx], -1).astype(np.int64)
+            return df.assign(cohort=binned)
+
+        return FertilityData(self.source, remap(self.women), remap(self.births),
+                             remap(self.exposure), self.completion_age)
+
 
 def merge(observed: FertilityData, forecast: FertilityData) -> FertilityData:
     """Combine observed-complete women with model forecasts into one completed dataset.

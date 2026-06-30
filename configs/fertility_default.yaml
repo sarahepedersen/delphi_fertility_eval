@@ -45,11 +45,13 @@ bins:
     max: 50
     step: 5
   cohort:
-    # Birth-year cohort bracket edges. If `edges` is null, brackets are built from
-    # min/max/step. Ages and cohorts are both stratified for subgroup AUC/calibration.
+    # Birth-year cohort bracket edges, used BOTH for AUC/calibration subgroups AND to bin
+    # the cohort-family demographic estimators (CCF, PPR, parity dist, time-to-event) so
+    # they show one line per bracket instead of per birth year. If `edges` is null,
+    # brackets are built from min/max/step. Cohorts outside the range are dropped.
     edges: null
-    min: 1930
-    max: 1990
+    min: 1900
+    max: 2030
     step: 10
 
 # ---------------------------------------------------------------------------

@@ -302,14 +302,22 @@ def lexis_first_birth(fd: FertilityData) -> pd.DataFrame:
 # --------------------------------------------------------------------------- #
 # convenience: run them all                                                     #
 # --------------------------------------------------------------------------- #
-def run_all(fd: FertilityData, selected_years: list[int], max_parity: int = 6) -> dict[str, pd.DataFrame]:
-    """Compute every observed estimator; returned dict keys double as output filenames."""
+def run_all(fd: FertilityData, selected_years: list[int], max_parity: int = 6,
+            cohort_edges: list[int] | None = None) -> dict[str, pd.DataFrame]:
+    """Compute every observed estimator; returned dict keys double as output filenames.
+
+    ``cohort_edges`` (from ``config.bins.cohort``) groups the cohort-family estimators
+    (CCF, completed CCF, PPR, parity distribution, time-to-event) into cohort *bins* — one
+    line per bin instead of per birth year. ASFR / mean-age / age×parity / birth-order /
+    Lexis keep fine (single-year) cohort resolution.
+    """
+    cfd = fd.binned_cohorts(cohort_edges) if cohort_edges else fd
     return {
-        "ccf_curve": ccf_curve(fd),
-        "completed_cohort_fertility": completed_cohort_fertility(fd),
-        "parity_progression_ratios": parity_progression_ratios(fd, max_parity),
-        "parity_distribution": parity_distribution(fd, max_parity),
-        "time_to_first_birth": time_to_event(fd, transition=0),
+        "ccf_curve": ccf_curve(cfd),
+        "completed_cohort_fertility": completed_cohort_fertility(cfd),
+        "parity_progression_ratios": parity_progression_ratios(cfd, max_parity),
+        "parity_distribution": parity_distribution(cfd, max_parity),
+        "time_to_first_birth": time_to_event(cfd, transition=0),
         "mean_age_first_birth": mean_age_first_birth(fd, by="period"),
         "asfr": asfr(fd),
         "tfr": tfr(fd),

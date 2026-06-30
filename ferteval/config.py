@@ -56,8 +56,8 @@ class AgeBins:
 @dataclass
 class CohortBins:
     edges: list[int] | None = None
-    min: int = 1930
-    max: int = 1990
+    min: int = 1900
+    max: int = 2030
     step: int = 10
 
     def edge_list(self) -> list[int]:

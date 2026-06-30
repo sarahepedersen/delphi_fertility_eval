@@ -171,7 +171,8 @@ def run_demography(cfg: EvalConfig, fd: FertilityData | None = None) -> dict:
         )
 
     dg = cfg.demography
-    tables = demog.run_all(fd, dg.selected_years, dg.max_parity)
+    cohort_edges = cfg.bins.cohort.edge_list()
+    tables = demog.run_all(fd, dg.selected_years, dg.max_parity, cohort_edges)
 
     out = Path(cfg.paths.out) / "demography"
     for name, df in tables.items():
@@ -208,13 +209,14 @@ def run_forecast(cfg: EvalConfig, bundle=None, vocab: TokenVocab | None = None) 
     completed = merge(observed, forecast)
 
     out = Path(cfg.paths.out) / "forecast"
-    tables = demog.run_all(completed, dg.selected_years, dg.max_parity)
+    cohort_edges = cfg.bins.cohort.edge_list()
+    tables = demog.run_all(completed, dg.selected_years, dg.max_parity, cohort_edges)
     for name, df in tables.items():
         _write_table(df, out / f"completed__{name}")
 
-    # observed → completed CCF overlay (forecast fills the dashed tail)
-    ccf_obs = demog.ccf_curve(observed)
-    ccf_full = demog.ccf_curve(completed)
+    # observed → completed CCF overlay (forecast fills the dashed tail), by cohort bin
+    ccf_obs = demog.ccf_curve(observed.binned_cohorts(cohort_edges))
+    ccf_full = demog.ccf_curve(completed.binned_cohorts(cohort_edges))
     plotting.plot_ccf_completed(ccf_obs, ccf_full, out / "ccf_observed_vs_completed.png")
     plotting.plot_lexis_surface(tables["lexis_first_birth"], out / "lexis_completed.png",
                                 title="First-birth intensity (observed + forecast)")
