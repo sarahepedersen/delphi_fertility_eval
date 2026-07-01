@@ -392,10 +392,24 @@ def _backtest_components(cfg: EvalConfig, bundle, vocab: TokenVocab, data, obser
     obs_final = observed.women.set_index("woman_id")["final_parity"]  # held-out truth per woman
 
     rows, rec_rows, predict_rows = [], [], []
-    for k, age in enumerate(cfg.forecast.backtest_truncation_ages):
-        seeds = sampling.build_seeds(data, vocab, woman_ids=ids, truncate_age=age)
-        states = sampling.seed_states(seeds, vocab)
-        trajs = sampling.forecast_sequences(bundle, vocab, seeds, fc, np.random.default_rng(fc.seed + k + 1))
+    ns = fc.n_samples
+
+    # Build every truncation-age's seeds up front and roll them ALL forward in ONE batched pass
+    all_seeds, age_ranges, states_by_age = [], {}, {}
+    for age in cfg.forecast.backtest_truncation_ages:
+        seeds_a = sampling.build_seeds(data, vocab, woman_ids=ids, truncate_age=age)
+        age_ranges[age] = (len(all_seeds), len(all_seeds) + len(seeds_a))
+        all_seeds.extend(seeds_a)
+        states_by_age[age] = sampling.seed_states(seeds_a, vocab)
+    if not all_seeds:
+        return empty
+    all_trajs = sampling.forecast_sequences(bundle, vocab, all_seeds, fc, np.random.default_rng(fc.seed + 1))
+
+    for age in cfg.forecast.backtest_truncation_ages:
+        s0, s1 = age_ranges[age]
+        r0 = s0 * ns
+        trajs = [(tid - r0, tok, ag) for (tid, tok, ag) in all_trajs[s0 * ns:s1 * ns]]  # re-id to 0..
+        states = states_by_age[age]
         fcfd_raw = FertilityData.from_sequences(trajs, vocab, dg.completion_age, (dg.repro_age_min, dg.repro_age_max))
         fcfd = fcfd_raw.binned_cohorts(edges)
         fc_comp = decomp.parity_components(fcfd, dc.max_parity).set_index("cohort")

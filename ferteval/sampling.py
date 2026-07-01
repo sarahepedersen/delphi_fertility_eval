@@ -78,102 +78,107 @@ def build_seeds(data: np.ndarray, vocab: TokenVocab, woman_ids=None, truncate_ag
 # --------------------------------------------------------------------------- #
 def forecast_sequences(bundle: DelphiBundle, vocab: TokenVocab, seeds, fc: ForecastConfig,
                        rng: np.random.Generator | None = None):
-    """Roll each seed forward ``fc.n_samples`` times; return ``(new_id, tokens, ages_days)``."""
+    """Roll each seed forward ``fc.n_samples`` times; return ``[(new_id, tokens, ages_days)]``.
+
+    Fully vectorised on-device: state (token/age buffers, ``lengths``, ``active`` mask) lives on
+    the model's device and every step advances the whole batch with torch ops — the competing-
+    exponential sampling runs on-device, so there is **no per-step CPU sync and no per-trajectory
+    Python loop**. Only the forward is chunked (by ``fc.batch_size``) to bound the attention
+    tensor's memory; its last-position logits are kept on the GPU. Runs on CPU too (tests).
+    """
     import torch
 
-    rng = rng or np.random.default_rng(fc.seed)
+    n_seeds = len(seeds)
+    if n_seeds == 0:
+        return []
     model, device = bundle.model, bundle.device
     block = int(getattr(model.config, "block_size", 80))
     pad = vocab.padding_id or 0
     death_id = vocab.end_sequence_id
-    blocked = _blocked_ids(vocab)
+    blocked = sorted(_blocked_ids(vocab))
     max_age_days = fc.max_age_years * DAYS_PER_YEAR
-    cap_days = fc.age_cap_years * DAYS_PER_YEAR
+    ns = int(fc.n_samples)
+    seed = int(rng.integers(0, 2 ** 31 - 1)) if rng is not None else int(fc.seed)
 
-    trajs, nid = [], 0
-    for (_wid, tokens, ages) in seeds:
-        for _ in range(fc.n_samples):
-            trajs.append({"id": nid, "tok": list(tokens), "age": list(ages), "active": True})
-            nid += 1
+    # seed buffers: one row per seed (right-padded), then replicated n_samples times
+    st = np.full((n_seeds, block), pad, dtype=np.int64)
+    sa = np.zeros((n_seeds, block), dtype=np.float32)
+    sl = np.zeros(n_seeds, dtype=np.int64)
+    for i, (_wid, tokens, ages) in enumerate(seeds):
+        tk = np.asarray(tokens, dtype=np.int64)[-block:]
+        ag = np.asarray(ages, dtype=np.float32)[-block:]
+        s = len(tk)
+        st[i, :s] = tk; sa[i, :s] = ag; sl[i] = max(s, 1)
+
+    buf_tok = torch.as_tensor(st, device=device).repeat_interleave(ns, 0)
+    buf_age = torch.as_tensor(sa, device=device).repeat_interleave(ns, 0)
+    lengths = torch.as_tensor(sl, device=device).repeat_interleave(ns, 0)
+    B = buf_tok.shape[0]
+    rowsB = torch.arange(B, device=device)
+    last_age = buf_age[rowsB, (lengths - 1).clamp_min(0)]
+    active = torch.ones(B, dtype=torch.bool, device=device)
+    try:
+        g = torch.Generator(device=device); g.manual_seed(seed)
+    except (RuntimeError, TypeError):
+        g = None; torch.manual_seed(seed)
+
+    def _terminate(mask):  # append death marker at completion age for the masked rows
+        if death_id is None:
+            return
+        lf = lengths[mask]
+        buf_tok[rowsB[mask], lf] = death_id
+        buf_age[rowsB[mask], lf] = float(max_age_days)
+        lengths[mask] = lf + 1
 
     model.to(device)
     with torch.no_grad():
-        for _ in range(fc.max_steps):
-            active = [t for t in trajs if t["active"]]
-            if not active:
+        for _ in range(int(fc.max_steps)):
+            if not bool(active.any()):
                 break
-            last_logits, last_age = _forward_last(active, model, torch, device, block, pad, fc.batch_size)
-            last_logits[:, list(blocked)] = -np.inf
+            logits = _forward_last(buf_tok, buf_age, lengths, model, torch, device, int(fc.batch_size))
+            logits[:, blocked] = float("-inf")
             if fc.temperature != 1.0:
-                last_logits = last_logits / fc.temperature
+                logits = logits / fc.temperature
 
-            dt, nxt = _competing_exponential(last_logits, rng)
-            for i, t in enumerate(active):
-                age_next = last_age[i] + dt[i]
-                if age_next >= max_age_days or age_next > cap_days:
-                    # the next event falls at/after completion → stop without emitting it
-                    _finalize(t, death_id, max_age_days)
-                    continue
-                t["tok"].append(int(nxt[i])); t["age"].append(float(age_next))
-                if death_id is not None and int(nxt[i]) == death_id:
-                    t["active"] = False
+            u = torch.rand(logits.shape, generator=g, device=device).clamp_min(1e-12)
+            times = -torch.exp(-logits) * torch.log(u)          # t_k ~ Exp(exp(logit_k))
+            times = torch.nan_to_num(times, nan=float("inf"), posinf=float("inf"))
+            dt, nxt = times.min(dim=1)
+            age_next = last_age + dt
 
-    # any trajectory still active at the step cap is closed off as complete
-    for t in trajs:
-        if t["active"]:
-            _finalize(t, death_id, max_age_days)
-    return [(t["id"], np.array(t["tok"], dtype=np.int64), np.array(t["age"], dtype=np.float64)) for t in trajs]
+            has_room = lengths < block
+            reached = age_next >= max_age_days
+            emit = active & (~reached) & has_room
+            le = lengths[emit]
+            buf_tok[rowsB[emit], le] = nxt[emit]
+            buf_age[rowsB[emit], le] = age_next[emit]
+            lengths[emit] = le + 1
+            last_age[emit] = age_next[emit]
+
+            _terminate(active & reached & has_room)             # reached completion → death@50
+            died = (emit & (nxt == death_id)) if death_id is not None else torch.zeros_like(active)
+            active = active & ~((active & reached) | (active & ~has_room) | died)
+
+        _terminate(active & (lengths < block))                  # close off survivors at the step cap
+
+    tok = buf_tok.cpu().numpy(); age = buf_age.cpu().numpy(); L = lengths.cpu().numpy()
+    return [(b, tok[b, :L[b]].astype(np.int64), age[b, :L[b]].astype(np.float64)) for b in range(B)]
 
 
-def _forward_last(active, model, torch, device, block, pad, batch_size):
-    """Forward the active trajectories in mini-batches; return (last-position logits [B,V]
-    numpy, last age [B] days).
-
-    Chunking bounds GPU memory: a single forward over *all* trajectories would allocate a
-    logits tensor — and the model's full attention tensor ``(n_layer, B, n_head, T, T)`` —
-    sized by the total trajectory count (incomplete women × n_samples), which OOMs. We
-    process ``batch_size`` trajectories at a time and keep only the last-position logits.
-    """
-    logits_out, age_out = [], []
+def _forward_last(buf_tok, buf_age, lengths, model, torch, device, batch_size):
+    """Chunked forward over the whole batch; return last-position logits ``(B, V)`` **on the
+    model's device** (no CPU sync). Chunking by ``batch_size`` bounds the model's attention
+    tensor ``(n_layer, chunk, n_head, T, T)``, which is the real memory driver."""
+    B = buf_tok.shape[0]
     bs = max(1, int(batch_size))
-    for start in range(0, len(active), bs):
-        chunk = active[start:start + bs]
-        Lw = min(max(len(t["tok"]) for t in chunk), block)
-        B = len(chunk)
-        idx = torch.full((B, Lw), pad, dtype=torch.long)
-        age = torch.zeros((B, Lw), dtype=torch.float32)
-        last_pos = []
-        for j, t in enumerate(chunk):
-            tk, ag = t["tok"][-Lw:], t["age"][-Lw:]
-            idx[j, :len(tk)] = torch.tensor(tk, dtype=torch.long)
-            age[j, :len(ag)] = torch.tensor(ag, dtype=torch.float32)
-            last_pos.append(len(tk) - 1)
-            age_out.append(t["age"][-1])
-        out = model(idx.to(device), age.to(device))[0]                     # (B, Lw, V)
-        rows = torch.arange(B, device=out.device)
-        cols = torch.tensor(last_pos, device=out.device)
-        logits_out.append(out[rows, cols].float().cpu().numpy())           # (B, V)
+    outs = []
+    for s in range(0, B, bs):
+        e = min(s + bs, B)
+        out = model(buf_tok[s:e], buf_age[s:e])[0]                     # (chunk, block, V)
+        rows = torch.arange(e - s, device=out.device)
+        outs.append(out[rows, lengths[s:e] - 1].float())              # (chunk, V), stays on device
         del out
-    return np.concatenate(logits_out, axis=0), np.array(age_out, dtype=np.float64)
-
-
-def _competing_exponential(logits: np.ndarray, rng: np.random.Generator):
-    """Draw (Δt, next_token) per row via competing exponentials with rates exp(logit)."""
-    u = rng.random(logits.shape)
-    with np.errstate(over="ignore", invalid="ignore"):
-        times = -np.exp(-logits) * np.log(u)        # t_k ~ Exp(exp(logit_k)); masked → inf
-    times[~np.isfinite(times)] = np.inf
-    return times.min(axis=1), times.argmin(axis=1)
-
-
-def _finalize(t, death_id, age_days):
-    """Close a trajectory by appending a death/end marker (at a strictly later age) so
-    extraction treats it as complete."""
-    t["active"] = False
-    if death_id is None or (t["tok"] and t["tok"][-1] == death_id):
-        return
-    floor = (t["age"][-1] + 1.0) if t["age"] else age_days  # keep ages strictly increasing
-    t["tok"].append(int(death_id)); t["age"].append(float(max(age_days, floor)))
+    return torch.cat(outs, dim=0)
 
 
 def _blocked_ids(vocab: TokenVocab) -> set[int]:
