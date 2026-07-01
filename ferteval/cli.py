@@ -109,6 +109,30 @@ def _cmd_forecast(args):
     print(f"Wrote forecast (completed + backtest) tables + figures to {cfg.paths.out}/forecast")
 
 
+def _cmd_decompose(args):
+    from . import pipelines
+    cfg = _load_cfg(args)
+    res = pipelines.run_decomposition(cfg)
+    trend = res["trend"]
+    if not trend.empty:
+        latest = trend.sort_values("cohort").iloc[-1]
+        print(f"ΔCCF vs cohort {int(latest['reference'])} for cohort {int(latest['cohort'])}: "
+              f"{latest['dccf']:+.3f}  = childlessness {latest['childlessness_effect']:+.3f} "
+              f"+ family-size {latest['familysize_effect']:+.3f}")
+    bt = res["backtest"]
+    if not bt.empty:
+        print(f"Component backtest: childlessness MAE {(bt['childless_fc'] - bt['childless_obs']).abs().mean():.3f}, "
+              f"parity-dist TVD mean {bt['tvd'].mean():.3f}")
+    ca = res["childlessness_auc"]
+    if not ca.empty and ca["auc"].notna().any():
+        print("Childlessness predictability AUC (by cohort, oldest→newest):")
+        for age, g in ca.groupby("prediction_age"):
+            g = g.sort_values("cohort")
+            aucs = ", ".join(f"{int(c)}:{a:.2f}" for c, a in zip(g["cohort"], g["auc"]) if a == a)
+            print(f"  predict@{int(age)}: {aucs}")
+    print(f"Wrote decomposition tables + figures to {cfg.paths.out}/decomposition")
+
+
 def _cmd_all(args):
     from . import pipelines
     cfg = _load_cfg(args)
@@ -139,7 +163,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     for name, handler in (("auc", _cmd_auc), ("calibration", _cmd_calibration), ("all", _cmd_all),
-                          ("demography", _cmd_demography), ("forecast", _cmd_forecast)):
+                          ("demography", _cmd_demography), ("forecast", _cmd_forecast),
+                          ("decompose", _cmd_decompose)):
         p = sub.add_parser(name, help=f"run {name}")
         _add_common(p)
         p.set_defaults(func=handler)

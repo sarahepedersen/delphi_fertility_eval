@@ -178,7 +178,9 @@ def _duration_event(fd: FertilityData, transition: int):
         wid = w.woman_id
         if transition > 0 and wid not in prev:
             continue  # never reached the starting parity → not at risk
-        start = float(prev[wid]) if transition > 0 else float(w.entry_age)
+        # first birth is measured on the absolute age axis; higher transitions as the
+        # inter-birth interval since the previous birth
+        start = float(prev[wid]) if transition > 0 else 0.0
         if wid in nth:
             dur.append(float(nth[wid]) - start); ev.append(1)
         else:

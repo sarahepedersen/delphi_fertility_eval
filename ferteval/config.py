@@ -107,6 +107,11 @@ class Demography:
     period_min: int | None = None  # drop earlier years from period-indexed metrics (None => derived)
     period_max: int | None = None
     mab_by: str = "period"         # mean-age-at-first-birth axis: "period" | "cohort"
+    # Per-plot display cutoffs (filter the FIGURES only; written tables stay complete).
+    ccf_max_cohort: int | None = None
+    ppr_max_cohort: int | None = None
+    ttfb_max_cohort: int | None = None
+    asfr_exclude_periods: list[int] = field(default_factory=list)
 
     def resolved_period_min(self) -> int | None:
         """Explicit period_min, else derived from cohort_min (cohort_min + repro_age_max) —
@@ -130,6 +135,13 @@ class Forecast:
 
 
 @dataclass
+class Decomposition:
+    reference_cohort: int | None = None  # None => oldest complete cohort bin
+    max_parity: int = 6
+    recuperation_age_bins: list[int] = field(default_factory=lambda: [25, 30, 35, 40, 45])
+
+
+@dataclass
 class EvalConfig:
     paths: Paths = field(default_factory=Paths)
     tokens: Tokens = field(default_factory=Tokens)
@@ -139,6 +151,7 @@ class EvalConfig:
     metrics: Metrics = field(default_factory=Metrics)
     demography: Demography = field(default_factory=Demography)
     forecast: Forecast = field(default_factory=Forecast)
+    decomposition: Decomposition = field(default_factory=Decomposition)
 
     # ------------------------------------------------------------------ #
     # Construction                                                       #
@@ -168,6 +181,7 @@ class EvalConfig:
             metrics=Metrics(**(d.get("metrics") or {})),
             demography=Demography(**(d.get("demography") or {})),
             forecast=Forecast(**(d.get("forecast") or {})),
+            decomposition=Decomposition(**(d.get("decomposition") or {})),
         )
 
     # ------------------------------------------------------------------ #

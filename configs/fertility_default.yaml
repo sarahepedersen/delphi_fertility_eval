@@ -103,6 +103,11 @@ demography:
   period_max: null
   mab_by: period                       # mean-age-at-first-birth axis: period | cohort
                                         #   use "cohort" when you left-truncate by cohort
+  # Per-plot display cutoffs (figures only; the written CSV/parquet tables stay complete).
+  ccf_max_cohort: 1980                  # CCF plot: drop cohort bins after this
+  ppr_max_cohort: 1970                  # PPR plot: drop cohort bins after this
+  ttfb_max_cohort: 1990                 # time-to-first-birth plot: drop cohort bins after this
+  asfr_exclude_periods: [2024]          # ASFR plot: omit these (boundary/incomplete) period years
 
 # ---------------------------------------------------------------------------
 # Forecasting engine (phase 2: `ferteval.cli forecast`) — completes incomplete
@@ -117,3 +122,12 @@ forecast:
   backtest_cohort_step: 5                  # group the backtest CCF into cohort bins this wide
   max_display_cohort: 2000                 # CCF observed/forecast plot: drop cohorts born after this
                                            #   (younger cohorts are too early in childbearing to forecast)
+
+# ---------------------------------------------------------------------------
+# CCF decomposition (phase 3: `ferteval.cli decompose`) — attribute CCF change to
+# childlessness vs family size, probe recuperation, and backtest the breakdown.
+# ---------------------------------------------------------------------------
+decomposition:
+  reference_cohort: null                   # cohort bin to decompose ΔCCF against (null => oldest complete)
+  max_parity: 6
+  recuperation_age_bins: [25, 30, 35, 40, 45]  # cutoff-age brackets for the recuperation curve

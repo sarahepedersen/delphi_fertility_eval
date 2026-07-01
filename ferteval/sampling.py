@@ -200,3 +200,27 @@ def forecast_incomplete(cfg: EvalConfig, bundle: DelphiBundle, vocab: TokenVocab
 def seeds_from_data(data: np.ndarray, vocab: TokenVocab, up_to_age_years: float | None = None):
     """Backwards-compatible alias for :func:`build_seeds` (truncate at ``up_to_age_years``)."""
     return build_seeds(data, vocab, truncate_age=up_to_age_years)
+
+
+def seed_states(seeds, vocab: TokenVocab):
+    """Per-seed state at the forecast cutoff, indexed by seed order.
+
+    Columns: ``seed_idx, woman_id, cohort, cutoff_age, parity_at_cutoff``. Each forecast
+    trajectory maps back to its seed via ``trajectory_id // n_samples``, so this lets the
+    recuperation analysis condition the model's forecast on the woman's state at the cutoff.
+    """
+    import pandas as pd
+
+    child_ids = list(vocab.child_id_set)
+    rows = []
+    for idx, (wid, tokens, ages) in enumerate(seeds):
+        toks = np.asarray(tokens, dtype=np.int64)
+        cohort = vocab.cohort_of_sequence(toks)
+        rows.append({
+            "seed_idx": idx,
+            "woman_id": int(wid),
+            "cohort": int(cohort) if cohort is not None else -1,
+            "cutoff_age": (float(max(ages)) / DAYS_PER_YEAR) if len(ages) else float("nan"),
+            "parity_at_cutoff": int(np.isin(toks, child_ids).sum()),
+        })
+    return pd.DataFrame(rows)
