@@ -180,14 +180,26 @@ def plot_birth_order_age_profile(prof: pd.DataFrame, out_path, title="Age profil
     return _save(fig, out_path)
 
 
-def plot_lexis_surface(lexis: pd.DataFrame, out_path, title="First-birth intensity (Lexis)") -> "Path | None":
-    """Heatmap cohort (x) × age (y) of first-birth intensity; unobserved cells left blank."""
+def plot_lexis_surface(lexis: pd.DataFrame, out_path, title="First-birth intensity (Lexis)",
+                       forecast_boundary_period: int | None = None) -> "Path | None":
+    """Heatmap cohort (x) × age (y) of first-birth intensity; unobserved cells left blank.
+
+    If ``forecast_boundary_period`` (the calendar year the data ends) is given, draw the
+    line ``age = period − cohort`` marking the observed/forecast frontier: everything below
+    it is observed, everything above is model forecast.
+    """
     if lexis.empty:
         return None
     grid = lexis.pivot_table(index="age", columns="cohort", values="intensity")
     fig, ax = plt.subplots(figsize=(7.5, 5))
     im = ax.pcolormesh(grid.columns, grid.index, grid.to_numpy(), shading="nearest")
     fig.colorbar(im, ax=ax, label="first-birth intensity")
+    if forecast_boundary_period is not None:
+        cohorts = grid.columns.to_numpy()
+        ages = float(forecast_boundary_period) - cohorts   # age = period − cohort
+        ax.plot(cohorts, ages, color="red", lw=2, label=f"data cutoff ({forecast_boundary_period}) — forecast above")
+        ax.set_ylim(grid.index.min(), grid.index.max())
+        ax.legend(fontsize=8, loc="lower left")
     ax.set_xlabel("Birth cohort"); ax.set_ylabel("Age"); ax.set_title(title)
     return _save(fig, out_path)
 
@@ -213,17 +225,17 @@ def plot_ccf_completed(ccf_obs: pd.DataFrame, ccf_full: pd.DataFrame, out_path,
     return _save(fig, out_path)
 
 
-def plot_backtest_ccf(bt: pd.DataFrame, out_path, title="Backtest: forecast vs observed CCF") -> "Path | None":
-    """Scatter of forecast vs observed completed CCF, one colour per truncation age."""
+def plot_backtest_ccf(bt: pd.DataFrame, out_path, title="Backtest: forecast vs observed CCF by cohort") -> "Path | None":
+    """Completed CCF by cohort bin: observed truth (line) vs forecast from each truncation age."""
     if bt.empty:
         return None
-    fig, ax = plt.subplots(figsize=(5.5, 5.5))
-    lo = min(bt["ccf_observed"].min(), bt["ccf_forecast"].min())
-    hi = max(bt["ccf_observed"].max(), bt["ccf_forecast"].max())
-    ax.plot([lo, hi], [lo, hi], ls="--", c="grey", lw=1, label="perfect")
+    fig, ax = plt.subplots(figsize=(7.5, 4.5))
+    obs = bt.drop_duplicates("cohort").sort_values("cohort")  # truth is the same across truncation ages
+    ax.plot(obs["cohort"], obs["ccf_observed"], "k-o", lw=2, label="observed (truth)")
     for age, g in bt.groupby("truncation_age"):
-        ax.scatter(g["ccf_observed"], g["ccf_forecast"], label=f"trunc @ {int(age)}")
-    ax.set_xlabel("Observed CCF"); ax.set_ylabel("Forecast CCF"); ax.set_title(title)
+        g = g.sort_values("cohort")
+        ax.plot(g["cohort"], g["ccf_forecast"], marker="s", ls="--", label=f"forecast @ trunc {int(age)}")
+    ax.set_xlabel("Birth-cohort bin"); ax.set_ylabel("Completed CCF"); ax.set_title(title)
     ax.legend(fontsize=8)
     return _save(fig, out_path)
 

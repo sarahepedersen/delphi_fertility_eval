@@ -303,25 +303,49 @@ def lexis_first_birth(fd: FertilityData) -> pd.DataFrame:
 # convenience: run them all                                                     #
 # --------------------------------------------------------------------------- #
 def run_all(fd: FertilityData, selected_years: list[int], max_parity: int = 6,
-            cohort_edges: list[int] | None = None) -> dict[str, pd.DataFrame]:
+            cohort_edges: list[int] | None = None, cohort_min: int | None = None,
+            period_min: int | None = None, period_max: int | None = None,
+            mab_by: str = "period") -> dict[str, pd.DataFrame]:
     """Compute every observed estimator; returned dict keys double as output filenames.
 
     ``cohort_edges`` (from ``config.bins.cohort``) groups the cohort-family estimators
     (CCF, completed CCF, PPR, parity distribution, time-to-event) into cohort *bins* — one
     line per bin instead of per birth year. ASFR / mean-age / age×parity / birth-order /
     Lexis keep fine (single-year) cohort resolution.
+
+    ``cohort_min`` drops earlier (sparse / survivor-selected) cohorts; ``period_min`` /
+    ``period_max`` gate the period-indexed metrics (ASFR, TFR, period MAB1) to the years the
+    included cohorts fully cover; ``mab_by`` chooses the mean-age-at-first-birth axis.
     """
+    fd = fd.filter_cohorts(min_cohort=cohort_min)
     cfd = fd.binned_cohorts(cohort_edges) if cohort_edges else fd
+
+    mab = mean_age_first_birth(fd, by=mab_by)
+    if mab_by == "period":
+        mab = _filter_period(mab, period_min, period_max)
+
     return {
         "ccf_curve": ccf_curve(cfd),
         "completed_cohort_fertility": completed_cohort_fertility(cfd),
         "parity_progression_ratios": parity_progression_ratios(cfd, max_parity),
         "parity_distribution": parity_distribution(cfd, max_parity),
         "time_to_first_birth": time_to_event(cfd, transition=0),
-        "mean_age_first_birth": mean_age_first_birth(fd, by="period"),
-        "asfr": asfr(fd),
-        "tfr": tfr(fd),
+        "mean_age_first_birth": mab,
+        "asfr": _filter_period(asfr(fd), period_min, period_max),
+        "tfr": _filter_period(tfr(fd), period_min, period_max),
         "age_parity_surface": age_parity_surface(fd, selected_years, max_parity - 1),
         "birth_order_age_profile": birth_order_age_profile(fd, max_parity - 1),
         "lexis_first_birth": lexis_first_birth(fd),
     }
+
+
+def _filter_period(df: pd.DataFrame, period_min: int | None, period_max: int | None) -> pd.DataFrame:
+    """Keep rows whose ``period`` column is within [period_min, period_max]."""
+    if df.empty or "period" not in df.columns:
+        return df
+    m = pd.Series(True, index=df.index)
+    if period_min is not None:
+        m &= df["period"] >= period_min
+    if period_max is not None:
+        m &= df["period"] <= period_max
+    return df[m]

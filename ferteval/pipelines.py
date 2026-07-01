@@ -172,7 +172,9 @@ def run_demography(cfg: EvalConfig, fd: FertilityData | None = None) -> dict:
 
     dg = cfg.demography
     cohort_edges = cfg.bins.cohort.edge_list()
-    tables = demog.run_all(fd, dg.selected_years, dg.max_parity, cohort_edges)
+    tables = demog.run_all(fd, dg.selected_years, dg.max_parity, cohort_edges,
+                           cohort_min=dg.cohort_min, period_min=dg.resolved_period_min(),
+                           period_max=dg.period_max, mab_by=dg.mab_by)
 
     out = Path(cfg.paths.out) / "demography"
     for name, df in tables.items():
@@ -182,7 +184,7 @@ def run_demography(cfg: EvalConfig, fd: FertilityData | None = None) -> dict:
     plotting.plot_ccf_by_cohort(tables["ccf_curve"], out / "ccf_by_cohort.png")
     plotting.plot_ppr(tables["parity_progression_ratios"], out / "ppr.png")
     plotting.plot_km_survival(tables["time_to_first_birth"], out / "time_to_first_birth.png")
-    plotting.plot_mab1_timeseries(tables["mean_age_first_birth"], out / "mean_age_first_birth.png")
+    plotting.plot_mab1_timeseries(tables["mean_age_first_birth"], out / "mean_age_first_birth.png", x=dg.mab_by)
     plotting.plot_asfr(tables["asfr"], out / "asfr.png")
     plotting.plot_age_parity_surface(tables["age_parity_surface"], out)
     plotting.plot_birth_order_age_profile(tables["birth_order_age_profile"], out / "birth_order_age_profile.png")
@@ -210,16 +212,30 @@ def run_forecast(cfg: EvalConfig, bundle=None, vocab: TokenVocab | None = None) 
 
     out = Path(cfg.paths.out) / "forecast"
     cohort_edges = cfg.bins.cohort.edge_list()
-    tables = demog.run_all(completed, dg.selected_years, dg.max_parity, cohort_edges)
+    tables = demog.run_all(completed, dg.selected_years, dg.max_parity, cohort_edges,
+                           cohort_min=dg.cohort_min, period_min=dg.resolved_period_min(),
+                           period_max=dg.period_max, mab_by=dg.mab_by)
     for name, df in tables.items():
         _write_table(df, out / f"completed__{name}")
 
-    # observed → completed CCF overlay (forecast fills the dashed tail), by cohort bin
-    ccf_obs = demog.ccf_curve(observed.binned_cohorts(cohort_edges))
-    ccf_full = demog.ccf_curve(completed.binned_cohorts(cohort_edges))
+    # observed → completed CCF overlay (forecast fills the dashed tail), by cohort bin.
+    # Respect cohort_min, and drop cohorts born after max_display_cohort (too early to forecast).
+    cap = cfg.forecast.max_display_cohort
+    obs_c = observed.filter_cohorts(min_cohort=dg.cohort_min).binned_cohorts(cohort_edges)
+    full_c = completed.filter_cohorts(min_cohort=dg.cohort_min).binned_cohorts(cohort_edges)
+    ccf_obs = demog.ccf_curve(obs_c)
+    ccf_full = demog.ccf_curve(full_c)
+    if cap is not None:
+        ccf_obs = ccf_obs[ccf_obs["cohort"] <= cap]
+        ccf_full = ccf_full[ccf_full["cohort"] <= cap]
     plotting.plot_ccf_completed(ccf_obs, ccf_full, out / "ccf_observed_vs_completed.png")
+
+    # Lexis surface with a line marking the data cutoff (forecast beyond it). The frontier is
+    # the calendar year the data ends = the latest observed period (cohort + age).
+    boundary_period = int(observed.exposure["period"].max()) if len(observed.exposure) else None
     plotting.plot_lexis_surface(tables["lexis_first_birth"], out / "lexis_completed.png",
-                                title="First-birth intensity (observed + forecast)")
+                                title="First-birth intensity (observed + forecast)",
+                                forecast_boundary_period=boundary_period)
 
     backtest = _backtest(cfg, bundle, vocab, data, observed, fc)
     _write_table(backtest, out / "backtest_ccf")
@@ -231,30 +247,45 @@ def run_forecast(cfg: EvalConfig, bundle=None, vocab: TokenVocab | None = None) 
 
 def _backtest(cfg: EvalConfig, bundle, vocab: TokenVocab, data, observed: FertilityData,
               fc) -> pd.DataFrame:
-    """Truncate completed cohorts at each cutoff age, forecast forward, compare CCF to truth."""
+    """Truncate completed cohorts at each cutoff age, forecast forward, compare CCF to truth.
+
+    Results are grouped into cohort bins of width ``forecast.backtest_cohort_step`` (default
+    5 years) rather than per individual birth year.
+    """
     dg = cfg.demography
-    obs_ccf = demog.completed_cohort_fertility(observed)
-    complete_cohorts = set(obs_ccf.loc[obs_ccf["fully_observed"], "cohort"])
-    obs_lookup = obs_ccf.set_index("cohort")["ccf"]
+    step = max(1, cfg.forecast.backtest_cohort_step)
+    cols = ["truncation_age", "cohort", "ccf_observed", "ccf_forecast", "error"]
+
+    per_cohort = demog.completed_cohort_fertility(observed)
+    complete_cohorts = set(per_cohort.loc[per_cohort["fully_observed"], "cohort"])
+    if not complete_cohorts:
+        return pd.DataFrame(columns=cols)
+    lo = (min(complete_cohorts) // step) * step
+    hi = (max(complete_cohorts) // step + 1) * step
+    edges = list(range(int(lo), int(hi) + 1, step))
+
     w = observed.women
     complete_women = w[((~w["censored"]) | (w["exit_age"] >= dg.completion_age)) & w["cohort"].isin(complete_cohorts)]
+    ids = complete_women["woman_id"].tolist()
+    if not ids:
+        return pd.DataFrame(columns=cols)
+
+    # observed truth per cohort bin (restricted to the completed women)
+    obs_truth = demog.completed_cohort_fertility(observed.subset(ids).binned_cohorts(edges)).set_index("cohort")["ccf"]
 
     rows = []
     for k, age in enumerate(cfg.forecast.backtest_truncation_ages):
-        ids = complete_women["woman_id"].tolist()
-        if not ids:
-            continue
         seeds = sampling.build_seeds(data, vocab, woman_ids=ids, truncate_age=age)
         rng = np.random.default_rng(fc.seed + k + 1)
         trajs = sampling.forecast_sequences(bundle, vocab, seeds, fc, rng)
         fcfd = FertilityData.from_sequences(trajs, vocab, dg.completion_age, (dg.repro_age_min, dg.repro_age_max))
-        fc_ccf = demog.completed_cohort_fertility(fcfd).set_index("cohort")["ccf"]
-        for cohort in sorted(complete_cohorts):
-            if cohort in fc_ccf.index:
-                obs_v, fc_v = float(obs_lookup[cohort]), float(fc_ccf[cohort])
-                rows.append({"truncation_age": age, "cohort": int(cohort),
-                             "ccf_observed": obs_v, "ccf_forecast": fc_v, "error": fc_v - obs_v})
-    return pd.DataFrame(rows)
+        fc_ccf = demog.completed_cohort_fertility(fcfd.binned_cohorts(edges)).set_index("cohort")["ccf"]
+        for cbin in obs_truth.index:
+            if cbin in fc_ccf.index:
+                o, f = float(obs_truth[cbin]), float(fc_ccf[cbin])
+                rows.append({"truncation_age": age, "cohort": int(cbin),
+                             "ccf_observed": o, "ccf_forecast": f, "error": f - o})
+    return pd.DataFrame(rows, columns=cols)
 
 
 # --------------------------------------------------------------------------- #

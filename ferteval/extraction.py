@@ -83,6 +83,32 @@ class FertilityData:
     def with_source(self, label: str) -> "FertilityData":
         return FertilityData(label, self.women, self.births, self.exposure, self.completion_age)
 
+    def filter_cohorts(self, min_cohort: int | None = None, max_cohort: int | None = None) -> "FertilityData":
+        """Drop women/births/exposure whose cohort falls outside [min_cohort, max_cohort]."""
+        if min_cohort is None and max_cohort is None:
+            return self
+
+        def flt(df):
+            m = pd.Series(True, index=df.index)
+            if min_cohort is not None:
+                m &= df["cohort"] >= min_cohort
+            if max_cohort is not None:
+                m &= df["cohort"] <= max_cohort
+            return df[m]
+
+        return FertilityData(self.source, flt(self.women), flt(self.births), flt(self.exposure), self.completion_age)
+
+    def subset(self, woman_ids) -> "FertilityData":
+        """Restrict all three tables to a set of woman_ids."""
+        ids = set(woman_ids)
+        return FertilityData(
+            self.source,
+            self.women[self.women["woman_id"].isin(ids)],
+            self.births[self.births["woman_id"].isin(ids)],
+            self.exposure[self.exposure["woman_id"].isin(ids)],
+            self.completion_age,
+        )
+
     def binned_cohorts(self, edges) -> "FertilityData":
         """Return a copy whose ``cohort`` column is replaced by its cohort-bin lower edge.
 

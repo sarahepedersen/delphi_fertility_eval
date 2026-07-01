@@ -103,8 +103,19 @@ class Demography:
     completion_age: float = 50.0
     repro_age_min: int = 15
     repro_age_max: int = 50
-    period_min: int | None = None  # None => data-driven
+    cohort_min: int | None = None  # drop cohorts before this from the cohort-family estimators
+    period_min: int | None = None  # drop earlier years from period-indexed metrics (None => derived)
     period_max: int | None = None
+    mab_by: str = "period"         # mean-age-at-first-birth axis: "period" | "cohort"
+
+    def resolved_period_min(self) -> int | None:
+        """Explicit period_min, else derived from cohort_min (cohort_min + repro_age_max) —
+        the first period year to which no excluded cohort could still contribute a birth."""
+        if self.period_min is not None:
+            return self.period_min
+        if self.cohort_min is not None:
+            return self.cohort_min + self.repro_age_max
+        return None
 
 
 @dataclass
@@ -114,6 +125,8 @@ class Forecast:
     age_cap: float = 55.0
     temperature: float = 1.0
     backtest_truncation_ages: list[int] = field(default_factory=lambda: [30, 35, 40])
+    backtest_cohort_step: int = 5          # group the backtest CCF into cohort bins this wide
+    max_display_cohort: int | None = 2000  # drop cohorts born after this from the CCF observed/forecast plot
 
 
 @dataclass

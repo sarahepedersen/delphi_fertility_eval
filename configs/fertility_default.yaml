@@ -89,13 +89,20 @@ metrics:
 # Demographic estimators (phase 2: `ferteval.cli demography`).
 # ---------------------------------------------------------------------------
 demography:
-  selected_years: [1975, 2000, 2024]  # period years for the age × parity surface
+  selected_years: [1970, 2000, 2020]  # period years for the age × parity surface
   max_parity: 6
   completion_age: 50.0                 # age past which childbearing is treated as complete
   repro_age_min: 15
   repro_age_max: 50
-  period_min: null                     # null => data-driven calendar-year range
+  # Left-truncation controls. cohort_min drops early sparse/survivor-selected cohorts from the
+  # cohort-family estimators (CCF, PPR, parity dist, time-to-event, cohort MAB1). period_min
+  # gates the period-indexed metrics (ASFR, TFR, period MAB1); if null it is derived as
+  # cohort_min + repro_age_max — the first year no excluded cohort could still contribute a birth.
+  cohort_min: null                     # e.g. 1920 for a register whose data thins out before then
+  period_min: null                     # null => derived from cohort_min
   period_max: null
+  mab_by: period                       # mean-age-at-first-birth axis: period | cohort
+                                        #   use "cohort" when you left-truncate by cohort
 
 # ---------------------------------------------------------------------------
 # Forecasting engine (phase 2: `ferteval.cli forecast`) — completes incomplete
@@ -107,3 +114,6 @@ forecast:
   age_cap: 55.0            # hard stop for the rollout
   temperature: 1.0
   backtest_truncation_ages: [30, 35, 40]  # truncate completed cohorts here, forecast, compare
+  backtest_cohort_step: 5                  # group the backtest CCF into cohort bins this wide
+  max_display_cohort: 2000                 # CCF observed/forecast plot: drop cohorts born after this
+                                           #   (younger cohorts are too early in childbearing to forecast)
